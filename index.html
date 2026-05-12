@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>双つの旅路 — Two Paths RPG</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #1a1a1a;
+    color: #e8e0c8;
+    font-family: '游ゴシック', 'Hiragino Kaku Gothic ProN', 'ＭＳ ゴシック', monospace;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+  #wrap {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 640px;
+    height: 480px;
+  }
+  canvas {
+    display: block;
+    width: 640px;
+    height: 480px;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    background: #000;
+    cursor: default;
+  }
+  #hint {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, calc(-50% + 250px));
+    font-size: 12px;
+    color: #6a6a6a;
+    text-align: center;
+    width: 640px;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="screen" width="640" height="480" tabindex="0"></canvas>
+</div>
+<div id="hint">↑↓ : 選択   Z / Enter : 決定   X / Esc : 戻る</div>
+
+<script>
+'use strict';
+
+// ============================================================
+// 0. ユーティリティ
+// ============================================================
+const cvs = document.getElementById('screen');
+const ctx = cvs.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const W = 640, H = 480;
+
+const randInt = (lo, hi) => Math.floor(Math.random() * (hi - lo + 1)) + lo;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ============================================================
+// 1. データ層
+// ============================================================
+const PALETTE = {
+  hero: {
+    base:    '#0a1428',
+    panel:   '#0f1d36',
+    accent:  '#c8b568',
+    text:    '#e8e0c8',
+    textDim: '#8a8270',
+    hp:      '#a83232',
+    mp:      '#3a6aa8',
+    border:  '#5a6478',
+    border2: '#2a3848',
+  },
+  demon: {
+    base:    '#1a0a14',
+    panel:   '#26121e',
+    accent:  '#8b3a4a',
+    text:    '#c8b8a8',
+    textDim: '#7a6858',
+    hp:      '#6a2828',
+    mp:      '#553868',
+    border:  '#4a3848',
+    border2: '#2a1a26',
+  }
+};
+
+// プレイヤー初期値
+const PLAYER_TEMPLATE = {
+  hero: {
+    name: 'アレン',
+    title: '勇者',
+    hp: 30, maxHp: 30,
+    mp: 8,  maxMp: 8,
+    atk: 7, def: 6,
+    lv: 1, exp: 0,
+    skill: { name: '光の剣', mp: 4, mul: 2.0 },
+    sprite: 'hero'
+  },
+  demon: {
+    name: 'ヴェルク',
+    title: '魔王軍幹部',
+    hp: 24, maxHp: 24,
+    mp: 10, maxMp: 10,
+    atk: 9, def: 4,
+    lv: 1, exp: 0,
+    skill: { name: '闇の波動', mp: 5, mul: 2.2 },
+    sprite: 'demon'
+  }
+};
+
+// レベルアップ曲線
+const requiredExp = (lv) => Math.floor(10 * Math.pow(lv, 1.5));
+
+// レベルアップ時の成長
+const LEVEL_GAIN = {
+  hero:  { hp: 5, mp: 2, atk: 2, def: 2 },
+  demon: { hp: 4, mp: 2, atk: 3, def: 1 }
+};
+
+// 敵データ
+const ENEMIES = {
+  // 勇者ルート
+  slime:      { name: 'スライム',     hp: 8,  atk: 4,  def: 2, exp: 4,  sprite: 'slime',     color: '#5aa080' },
+  goblin:     { name: 'ゴブリン',     hp: 14, atk: 6,  def: 3, exp: 8,  sprite: 'goblin',    color: '#7a8a48' },
+  orc:        { name: 'オーク',       hp: 22, atk: 9,  def: 5, exp: 14, sprite: 'orc',       color: '#8a5a3a' },
+  shitennou:  { name: '四天王アズマ', hp: 35, atk: 12, def: 7, exp: 25, sprite: 'shitennou', color: '#a85838' },
+  maou:       { name: '魔王ザギル',   hp: 80, atk: 16, def: 9, exp: 0,  sprite: 'maou',      color: '#683048' },
+  // 魔王軍ルート
+  adventurer: { name: '冒険者',       hp: 8,  atk: 5,  def: 1, exp: 4,  sprite: 'adv',       color: '#a89878' },
+  knight:     { name: '騎士',         hp: 14, atk: 7,  def: 3, exp: 8,  sprite: 'knight',    color: '#8898b0' },
+  paladin:    { name: '聖騎士',       hp: 22, atk: 10, def: 4, exp: 14, sprite: 'paladin',   color: '#c8c0a8' },
+  sage:       { name: '賢者ミラ',     hp: 32, atk: 14, def: 5, exp: 25, sprite: 'sage',      color: '#a890c8' },
+  yuusha:     { name: '勇者リオン',   hp: 70, atk: 17, def: 8, exp: 0,  sprite: 'yuusha',    color: '#c8b568' },
+};
+
+// ゾーン進行
+const ZONES = {
+  hero: [
+    { name: '辺境の草原', enemies: ['slime'],            need: 2, msg: '柔らかな風が吹く草原。スライムが跳ねている。' },
+    { name: '暗き森',     enemies: ['slime', 'goblin'],  need: 2, msg: '木々がざわめく。ゴブリンの気配。' },
+    { name: '岩山の道',   enemies: ['goblin', 'orc'],    need: 2, msg: 'ごつごつとした岩山。オークの咆哮が響く。' },
+    { name: '魔王城外郭', enemies: ['orc', 'shitennou'], need: 2, msg: '黒い城壁が見える。四天王が立ちはだかる。' },
+  ],
+  demon: [
+    { name: '魔界の入口',   enemies: ['adventurer'],          need: 2, msg: '人間の冒険者どもが押し寄せてくる。' },
+    { name: '人界の森',     enemies: ['adventurer', 'knight'], need: 2, msg: '人界に侵入した。騎士団の哨戒部隊。' },
+    { name: '王城前',       enemies: ['knight', 'paladin'],    need: 2, msg: '聖騎士が守る王都。' },
+    { name: '光の聖堂',     enemies: ['paladin', 'sage'],      need: 2, msg: '眩しい光に満ちた聖堂。賢者が待つ。' },
+  ]
+};
+
+const FINAL_BOSS = { hero: 'maou', demon: 'yuusha' };
+
+// ============================================================
+// 2. 状態管理
+// ============================================================
+const gameState = {
+  scene: 'title',          // title / route_select / map / battle / final_battle / ending
+  route: null,             // 'hero' | 'demon'
+  player: null,
+  zoneIndex: 0,
+  battlesInZone: 0,
+  enemy: null,
+  battlePhase: 'menu',     // menu / message / enemyTurn / playerWin / playerLose
+  cursor: 0,
+  messages: [],            // 戦闘ログ
+  damages: [],             // 飛び出すダメージ数値
+  shake: 0,
+  flash: 0,
+  fade: 0,                 // 黒フェード (0..1)
+  fadeDir: 0,
+  fadeNext: null,
+  endingType: null,        // 'win' | 'lose'
+  textIndex: 0,
+  textTimer: 0,
+  endingText: [],
+  endingLine: 0,
+  endingChar: 0,
+};
+
+// ============================================================
+// 3. 入力
+// ============================================================
+const input = { up: false, down: false, left: false, right: false, ok: false, cancel: false };
+const justPressed = {};
+const keyMap = {
+  'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
+  'KeyW': 'up', 'KeyS': 'down', 'KeyA': 'left', 'KeyD': 'right',
+  'Enter': 'ok', 'Space': 'ok', 'KeyZ': 'ok',
+  'Escape': 'cancel', 'KeyX': 'cancel', 'Backspace': 'cancel'
+};
+window.addEventListener('keydown', (e) => {
+  const k = keyMap[e.code];
+  if (k) {
+    if (!input[k]) justPressed[k] = true;
+    input[k] = true;
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  const k = keyMap[e.code];
+  if (k) { input[k] = false; e.preventDefault(); }
+});
+cvs.addEventListener('click', () => cvs.focus());
+
+function consume(name) {
+  if (justPressed[name]) { justPressed[name] = false; return true; }
+  return false;
+}
+function clearJust() { for (const k in justPressed) justPressed[k] = false; }
+
+// ============================================================
+// 4. 描画ヘルパ
+// ============================================================
+function pal() { return gameState.route ? PALETTE[gameState.route] : PALETTE.hero; }
+
+function drawWindow(x, y, w, h, opts) {
+  opts = opts || {};
+  const p = pal();
+  const fill = opts.fill || p.panel;
+  const border = opts.border || p.border;
+  const border2 = opts.border2 || p.border2;
+  const highlight = opts.highlight || false;
+  ctx.fillStyle = fill;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = highlight ? p.accent : border;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.strokeStyle = border2;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 4, y + 4, w - 8, h - 8);
+}
+
+function drawText(text, x, y, opts) {
+  opts = opts || {};
+  const size = opts.size || 14;
+  const color = opts.color || pal().text;
+  const align = opts.align || 'left';
+  ctx.font = size + 'px "ＭＳ ゴシック","Osaka-Mono",monospace';
+  ctx.textAlign = align;
+  ctx.textBaseline = 'top';
+  if (opts.shadow !== false) {
+    ctx.fillStyle = '#000';
+    ctx.fillText(text, x + 1, y + 1);
+  }
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+function drawBar(x, y, w, h, ratio, color) {
+  const p = pal();
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 1, y + 1, Math.floor((w - 2) * clamp(ratio, 0, 1)), h - 2);
+  ctx.strokeStyle = p.border;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+function fillBg() {
+  ctx.fillStyle = pal().base;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ============================================================
+// 5. ドット絵風キャラクター
+// ============================================================
+// 各スプライトは 10x10 のセルで定義 (各セル DOT px)
+const SPR = {
+  slime: [
+    '..........',
+    '..........',
+    '....11....',
+    '...1111...',
+    '..111111..',
+    '..1.11.1..',
+    '.11111111.',
+    '.11111111.',
+    '..11..11..',
+    '..........',
+  ],
+  goblin: [
+    '..1..1....',
+    '..1111....',
+    '.111111...',
+    '.1.11.1...',
+    '.111111...',
+    '..1111....',
+    '.1.11.1...',
+    '111111111.',
+    '..1..1....',
+    '.11..11...',
+  ],
+  orc: [
+    '..1111....',
+    '.111111...',
+    '11.11.11..',
+    '11111111..',
+    '11.11.11..',
+    '11111111..',
+    '.111111...',
+    '1111111111',
+    '11.1111.11',
+    '.11....11.',
+  ],
+  shitennou: [
+    '....11....',
+    '...1111...',
+    '..1.11.1..',
+    '..111111..',
+    '.11111111.',
+    '111.11.111',
+    '.11111111.',
+    '.11111111.',
+    '..11..11..',
+    '..1....1..',
+  ],
+  maou: [
+    '11......11',
+    '11......11',
+    '.11.11.11.',
+    '.1.1111.1.',
+    '.11.11.11.',
+    '11111111.1',
+    '11.1111.11',
+    '11111111.1',
+    '.11.11.11.',
+    '.1..11..1.',
+  ],
+  adv: [
+    '....11....',
+    '....11....',
+    '...1111...',
+    '...1..1...',
+    '..111111..',
+    '.1.1111.1.',
+    '...1111...',
+    '...1..1...',
+    '..11..11..',
+    '..11..11..',
+  ],
+  knight: [
+    '....11....',
+    '...1111...',
+    '..1.11.1..',
+    '...1111...',
+    '..111111..',
+    '.11111111.',
+    '..111111..',
+    '..1.11.1..',
+    '..11..11..',
+    '.11....11.',
+  ],
+  paladin: [
+    '....11....',
+    '...1111...',
+    '...1111...',
+    '..1.11.1..',
+    '..111111..',
+    '.11111111.',
+    '.1.1111.1.',
+    '.11111111.',
+    '...1..1...',
+    '..11..11..',
+  ],
+  sage: [
+    '...1111...',
+    '..111111..',
+    '.111111111',
+    '.1.1111.1.',
+    '..111111..',
+    '...1111...',
+    '..111111..',
+    '.11111111.',
+    '..11..11..',
+    '.11....11.',
+  ],
+  yuusha: [
+    '....11....',
+    '...1111...',
+    '..1.11.1..',
+    '...1111...',
+    '...1..1...',
+    '..111111..',
+    '.1.1111.1.',
+    '...1111...',
+    '..11..11..',
+    '..11..11..',
+  ],
+  hero: [
+    '....11....',
+    '...1111...',
+    '..1.11.1..',
+    '...1111...',
+    '..111111..',
+    '.11.11.11.',
+    '..111111..',
+    '..1.11.1..',
+    '..11..11..',
+    '.11....11.',
+  ],
+  demon: [
+    '.1......1.',
+    '11......11',
+    '.11.11.11.',
+    '.1.1111.1.',
+    '..111111..',
+    '.11.11.11.',
+    '..111111..',
+    '.11.11.11.',
+    '..11..11..',
+    '..1....1..',
+  ],
+};
+
+function drawSprite(spriteKey, cx, cy, dot, color) {
+  const grid = SPR[spriteKey];
+  if (!grid) return;
+  const w = grid[0].length * dot;
+  const h = grid.length * dot;
+  const x0 = Math.floor(cx - w / 2);
+  const y0 = Math.floor(cy - h / 2);
+  ctx.fillStyle = color;
+  for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] === '1') {
+        ctx.fillRect(x0 + c * dot, y0 + r * dot, dot, dot);
+      }
+    }
+  }
+  // 影
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(x0 + 4, y0 + h + 2, w - 8, 3);
+}
+
+// ============================================================
+// 6. シーン: タイトル
+// ============================================================
+function updateTitle() {
+  if (consume('ok')) {
+    startFade(() => { gameState.scene = 'route_select'; gameState.cursor = 0; });
+  }
+}
+function drawTitle() {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, W, H);
+
+  // 装飾用の単純な水平線
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.lineWidth = 1;
+  for (let y = 80; y < H; y += 40) {
+    ctx.beginPath();
+    ctx.moveTo(40, y);
+    ctx.lineTo(W - 40, y);
+    ctx.stroke();
+  }
+
+  drawText('双 つ の 旅 路', W / 2, 130, { size: 20, align: 'center', color: '#c8b568' });
+  drawText('TWO  PATHS', W / 2, 165, { size: 14, align: 'center', color: '#5a6478' });
+  drawText('～勇者と魔王、二つの物語～', W / 2, 200, { size: 14, align: 'center', color: '#8a8270' });
+
+  // 中央ウィンドウ
+  const x = 200, y = 280, w = 240, h = 70;
+  ctx.fillStyle = '#0f1d36';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#c8b568';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.strokeStyle = '#2a3848';
+  ctx.strokeRect(x + 4, y + 4, w - 8, h - 8);
+
+  drawText('Z / Enter キーで開始', W / 2, y + 18, { size: 14, align: 'center', color: '#e8e0c8' });
+  drawText('↑↓で選択  X/Escで戻る', W / 2, y + 40, { size: 12, align: 'center', color: '#8a8270' });
+
+  drawText('Ver 1.0', W - 16, H - 24, { size: 12, align: 'right', color: '#3a3a4a' });
+}
+
+// ============================================================
+// 7. シーン: ルート選択
+// ============================================================
+const ROUTES = [
+  { key: 'hero',  title: '勇者の道',     desc: '世界を救うため、魔王城を目指す。', sub: '守備寄り・MP少なめ' },
+  { key: 'demon', title: '魔王軍の道',   desc: '人類を滅ぼすため、勇者を討つ。',    sub: '攻撃寄り・HP低め' },
+];
+
+function updateRouteSelect() {
+  if (consume('up'))   gameState.cursor = (gameState.cursor + 1) % 2;
+  if (consume('down')) gameState.cursor = (gameState.cursor + 1) % 2;
+  if (consume('cancel')) { startFade(() => { gameState.scene = 'title'; }); }
+  if (consume('ok')) {
+    const r = ROUTES[gameState.cursor].key;
+    startFade(() => {
+      gameState.route = r;
+      gameState.player = JSON.parse(JSON.stringify(PLAYER_TEMPLATE[r]));
+      gameState.zoneIndex = 0;
+      gameState.battlesInZone = 0;
+      gameState.scene = 'map';
+      gameState.cursor = 0;
+    });
+  }
+}
+function drawRouteSelect() {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, W, H);
+
+  drawText('道 を 選 べ', W / 2, 50, { size: 20, align: 'center', color: '#c8b568' });
+
+  for (let i = 0; i < ROUTES.length; i++) {
+    const r = ROUTES[i];
+    const p = PALETTE[r.key];
+    const x = 60, y = 110 + i * 150, w = 520, h = 130;
+    const selected = (gameState.cursor === i);
+
+    ctx.fillStyle = p.base;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = selected ? p.accent : p.border;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+    ctx.strokeStyle = p.border2;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 4, y + 4, w - 8, h - 8);
+
+    // スプライト表示
+    drawSprite(r.key === 'hero' ? 'hero' : 'demon', x + 70, y + h / 2, 8, p.accent);
+
+    ctx.font = '20px "ＭＳ ゴシック",monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#000';
+    ctx.fillText(r.title, x + 151, y + 21);
+    ctx.fillStyle = selected ? p.accent : p.text;
+    ctx.fillText(r.title, x + 150, y + 20);
+
+    drawText(r.desc, x + 150, y + 55, { size: 14, color: p.text });
+    drawText('特性: ' + r.sub, x + 150, y + 80, { size: 12, color: p.textDim });
+
+    if (selected) {
+      drawText('▶', x + 20, y + 50, { size: 20, color: p.accent });
+    }
+  }
+
+  ctx.fillStyle = '#0a1428';
+  ctx.fillRect(0, H - 30, W, 30);
+  drawText('↑↓ : 選択   Z : 決定   X : 戻る', W / 2, H - 22, { size: 12, align: 'center', color: '#8a8270' });
+}
+
+// ============================================================
+// 8. シーン: マップ
+// ============================================================
+const MAP_CMDS = ['戦う', '進む', 'ステータス'];
+
+function updateMap() {
+  if (gameState.fade > 0) return;
+  if (consume('up'))   gameState.cursor = (gameState.cursor + MAP_CMDS.length - 1) % MAP_CMDS.length;
+  if (consume('down')) gameState.cursor = (gameState.cursor + 1) % MAP_CMDS.length;
+  if (consume('ok')) {
+    const zone = ZONES[gameState.route][gameState.zoneIndex];
+    if (gameState.cursor === 0) {
+      // 戦う
+      const ek = zone.enemies[randInt(0, zone.enemies.length - 1)];
+      startBattle(ek);
+    } else if (gameState.cursor === 1) {
+      // 進む
+      if (gameState.battlesInZone >= zone.need) {
+        if (gameState.zoneIndex >= ZONES[gameState.route].length - 1) {
+          // 最終決戦
+          startFade(() => {
+            gameState.scene = 'final_battle';
+            startBattle(FINAL_BOSS[gameState.route], true);
+          });
+        } else {
+          startFade(() => {
+            gameState.zoneIndex++;
+            gameState.battlesInZone = 0;
+          });
+        }
+      } else {
+        // 進めない
+        gameState.mapMsg = 'まだこのエリアで戦闘が足りない…';
+        gameState.mapMsgTimer = 90;
+      }
+    } else if (gameState.cursor === 2) {
+      gameState.mapMsg = 'ステータスは画面右に常時表示中。';
+      gameState.mapMsgTimer = 120;
+    }
+  }
+}
+
+function drawMap() {
+  const p = pal();
+  fillBg();
+
+  const zone = ZONES[gameState.route][gameState.zoneIndex];
+
+  // タイトル帯
+  ctx.fillStyle = p.panel;
+  ctx.fillRect(0, 0, W, 60);
+  ctx.strokeStyle = p.border;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W - 2, 58);
+
+  drawText('第' + (gameState.zoneIndex + 1) + 'エリア : ' + zone.name, 20, 14, { size: 16, color: p.accent });
+  drawText('討伐数 ' + Math.min(gameState.battlesInZone, zone.need) + ' / ' + zone.need, W - 20, 14, { size: 14, color: p.text, align: 'right' });
+
+  // メインの「マップ風」装飾エリア
+  const mx = 20, my = 80, mw = W - 40, mh = 220;
+  drawWindow(mx, my, mw, mh);
+
+  // 風景: ドット風の地形
+  drawLandscape(mx + 10, my + 10, mw - 20, mh - 50);
+
+  // 説明テキスト
+  drawText(zone.msg, mx + 16, my + mh - 30, { size: 14, color: p.text });
+
+  // 下部: コマンド + ステータス
+  const cy = 320;
+  drawWindow(20, cy, 200, 140);
+  drawText('コマンド', 30, cy + 8, { size: 12, color: p.accent });
+  for (let i = 0; i < MAP_CMDS.length; i++) {
+    const selected = (i === gameState.cursor);
+    const yy = cy + 32 + i * 28;
+    if (selected) {
+      ctx.fillStyle = p.accent;
+      ctx.fillRect(30, yy + 8, 8, 4);
+    }
+    drawText(MAP_CMDS[i], 46, yy, { size: 16, color: selected ? p.accent : p.text });
+  }
+
+  // 進めない/メッセージ
+  if (gameState.mapMsgTimer > 0) {
+    drawText(gameState.mapMsg, 30, cy + 120, { size: 12, color: p.hp });
+    gameState.mapMsgTimer--;
+  }
+
+  drawStatusPanel(240, cy, W - 260, 140);
+}
+
+function drawLandscape(x, y, w, h) {
+  const p = pal();
+  // 空
+  ctx.fillStyle = gameState.route === 'hero' ? '#1a2848' : '#2a1428';
+  ctx.fillRect(x, y, w, Math.floor(h * 0.55));
+  // 地面
+  ctx.fillStyle = gameState.route === 'hero' ? '#2a3a28' : '#2a1a1a';
+  ctx.fillRect(x, y + Math.floor(h * 0.55), w, h - Math.floor(h * 0.55));
+
+  // 地平線の影
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x, y + Math.floor(h * 0.55) - 1, w, 1);
+
+  // ドット風の山(ゾーン進行で変化)
+  const zi = gameState.zoneIndex;
+  ctx.fillStyle = gameState.route === 'hero' ? '#3a4a58' : '#3a2838';
+  const horizon = y + Math.floor(h * 0.55);
+  for (let i = 0; i < 5 + zi; i++) {
+    const mx = x + ((i * 97 + zi * 31) % w);
+    const mh = 30 + ((i * 53 + zi * 17) % 40);
+    // 三角山
+    for (let dy = 0; dy < mh; dy++) {
+      const sw = mh - dy;
+      ctx.fillRect(mx - sw, horizon - dy, sw * 2, 1);
+    }
+  }
+
+  // 道
+  ctx.fillStyle = gameState.route === 'hero' ? '#5a4a38' : '#3a2828';
+  const roadY = horizon + Math.floor((h - (horizon - y)) * 0.5);
+  for (let i = 0; i < 30; i++) {
+    const rw = 8 + i * 4;
+    ctx.fillRect(x + w / 2 - rw / 2, roadY + i * 2, rw, 2);
+  }
+
+  // 城のシルエット(最終ゾーン)
+  if (zi >= ZONES[gameState.route].length - 1) {
+    const cxp = x + w / 2;
+    const cy = horizon - 50;
+    ctx.fillStyle = '#0a0a14';
+    ctx.fillRect(cxp - 30, cy, 60, 50);
+    ctx.fillRect(cxp - 38, cy + 6, 8, 44);
+    ctx.fillRect(cxp + 30, cy + 6, 8, 44);
+    // 旗
+    ctx.fillStyle = p.accent;
+    ctx.fillRect(cxp - 1, cy - 14, 2, 14);
+    ctx.fillRect(cxp - 1, cy - 14, 8, 5);
+  }
+
+  // プレイヤーのドット
+  drawSprite(gameState.player.sprite, x + w / 2, horizon - 20, 4, p.accent);
+}
+
+function drawStatusPanel(x, y, w, h) {
+  const p = pal();
+  drawWindow(x, y, w, h);
+  const pl = gameState.player;
+  drawText(pl.title + ' ' + pl.name, x + 14, y + 8, { size: 14, color: p.accent });
+  drawText('Lv ' + pl.lv, x + w - 14, y + 8, { size: 14, color: p.text, align: 'right' });
+
+  drawText('HP', x + 14, y + 36, { size: 12, color: p.text });
+  drawBar(x + 44, y + 38, w - 110, 10, pl.hp / pl.maxHp, p.hp);
+  drawText(pl.hp + '/' + pl.maxHp, x + w - 14, y + 36, { size: 12, color: p.text, align: 'right' });
+
+  drawText('MP', x + 14, y + 56, { size: 12, color: p.text });
+  drawBar(x + 44, y + 58, w - 110, 10, pl.mp / pl.maxMp, p.mp);
+  drawText(pl.mp + '/' + pl.maxMp, x + w - 14, y + 56, { size: 12, color: p.text, align: 'right' });
+
+  const need = requiredExp(pl.lv);
+  drawText('EXP ' + pl.exp + ' / ' + need, x + 14, y + 78, { size: 12, color: p.textDim });
+  drawText('攻撃 ' + pl.atk + '   守備 ' + pl.def, x + 14, y + 96, { size: 12, color: p.text });
+  drawText('必殺: ' + pl.skill.name + ' (MP' + pl.skill.mp + ')', x + 14, y + 114, { size: 12, color: p.accent });
+}
+
+// ============================================================
+// 9. シーン: 戦闘
+// ============================================================
+const BATTLE_CMDS = ['攻撃', '必殺技', '防御', '逃げる'];
+
+function startBattle(enemyKey, isFinal) {
+  const tpl = ENEMIES[enemyKey];
+  gameState.enemy = Object.assign({}, tpl);
+  gameState.enemy.maxHp = tpl.hp;
+  gameState.enemy.key = enemyKey;
+  gameState.scene = isFinal ? 'final_battle' : 'battle';
+  gameState.battlePhase = 'menu';
+  gameState.cursor = 0;
+  gameState.messages = [];
+  gameState.damages = [];
+  gameState.shake = 0;
+  gameState.flash = 0;
+  gameState.defending = false;
+  pushMsg(tpl.name + ' が あらわれた！');
+}
+
+function pushMsg(text) {
+  gameState.messages.push(text);
+  while (gameState.messages.length > 4) gameState.messages.shift();
+}
+
+function spawnDamage(text, x, y, color) {
+  gameState.damages.push({ text, x, y, vy: -1.5, life: 60, color });
+}
+
+function calcDamage(attacker, defender, mul, isCrit) {
+  let base = attacker.atk * (mul || 1) - defender.def;
+  base += randInt(-2, 2);
+  if (isCrit) base = Math.floor(base * 1.6);
+  return Math.max(1, Math.floor(base));
+}
+
+function playerAttack(useSkill) {
+  const pl = gameState.player;
+  const en = gameState.enemy;
+  let mul = 1, isCrit = false;
+  if (useSkill) {
+    if (pl.mp < pl.skill.mp) {
+      pushMsg('MPが足りない！');
+      gameState.battlePhase = 'message';
+      gameState.msgTimer = 40;
+      return;
+    }
+    pl.mp -= pl.skill.mp;
+    mul = pl.skill.mul;
+    pushMsg(pl.name + 'は ' + pl.skill.name + ' を放った！');
+  } else {
+    isCrit = Math.random() < 0.10;
+    pushMsg(pl.name + 'の こうげき！' + (isCrit ? '  会心の一撃！' : ''));
+  }
+  const dmg = calcDamage(pl, en, mul, isCrit);
+  en.hp = Math.max(0, en.hp - dmg);
+  spawnDamage(String(dmg), 0, 0, isCrit ? '#ffcc66' : '#ffffff');
+  gameState.shake = 12;
+  pushMsg(en.name + 'に ' + dmg + ' の ダメージ！');
+  gameState.battlePhase = 'message';
+  gameState.msgTimer = 50;
+  gameState.nextPhase = 'enemyTurn';
+}
+
+function enemyTurn() {
+  const pl = gameState.player;
+  const en = gameState.enemy;
+  if (en.hp <= 0) { resolveWin(); return; }
+  const isCrit = Math.random() < 0.08;
+  const defMul = gameState.defending ? 2 : 1;
+  let base = en.atk - pl.def * defMul;
+  base += randInt(-2, 2);
+  if (isCrit) base = Math.floor(base * 1.5);
+  const dmg = Math.max(1, Math.floor(base));
+  pl.hp = Math.max(0, pl.hp - dmg);
+  pushMsg(en.name + 'の こうげき！' + (isCrit ? '  痛恨の一撃！' : ''));
+  pushMsg(pl.name + 'は ' + dmg + ' の ダメージを受けた！');
+  spawnDamage(String(dmg), 1, 0, isCrit ? '#ff6644' : '#ffaaaa');
+  gameState.shake = 8;
+  gameState.defending = false;
+  gameState.battlePhase = 'message';
+  gameState.msgTimer = 50;
+  gameState.nextPhase = pl.hp <= 0 ? 'lose' : 'menu';
+}
+
+function resolveWin() {
+  const pl = gameState.player;
+  const en = gameState.enemy;
+  pushMsg(en.name + 'を 倒した！');
+  if (gameState.scene === 'final_battle') {
+    gameState.battlePhase = 'finalWin';
+    gameState.msgTimer = 90;
+    gameState.flash = 30;
+    return;
+  }
+  const gainedExp = en.exp;
+  pl.exp += gainedExp;
+  pushMsg(gainedExp + ' の 経験値を 得た！');
+  let leveled = false;
+  while (pl.exp >= requiredExp(pl.lv)) {
+    pl.exp -= requiredExp(pl.lv);
+    pl.lv++;
+    const g = LEVEL_GAIN[gameState.route];
+    pl.maxHp += g.hp; pl.hp = pl.maxHp;
+    pl.maxMp += g.mp; pl.mp = pl.maxMp;
+    pl.atk += g.atk;
+    pl.def += g.def;
+    leveled = true;
+  }
+  if (leveled) pushMsg('レベルが ' + pl.lv + ' に 上がった！');
+  gameState.battlesInZone++;
+  gameState.battlePhase = 'win';
+  gameState.msgTimer = 100;
+}
+
+function startBattleLose() {
+  gameState.battlePhase = 'lose';
+  gameState.msgTimer = 100;
+  pushMsg(gameState.player.name + 'は 倒れた…');
+}
+
+function updateBattle() {
+  // ダメージ数値更新
+  for (const d of gameState.damages) { d.y += d.vy; d.life--; }
+  gameState.damages = gameState.damages.filter(d => d.life > 0);
+  if (gameState.shake > 0) gameState.shake--;
+  if (gameState.flash > 0) gameState.flash--;
+
+  if (gameState.fade > 0) return;
+
+  if (gameState.battlePhase === 'menu') {
+    if (consume('up'))   gameState.cursor = (gameState.cursor + BATTLE_CMDS.length - 1) % BATTLE_CMDS.length;
+    if (consume('down')) gameState.cursor = (gameState.cursor + 1) % BATTLE_CMDS.length;
+    if (consume('left'))  gameState.cursor = (gameState.cursor + BATTLE_CMDS.length - 1) % BATTLE_CMDS.length;
+    if (consume('right')) gameState.cursor = (gameState.cursor + 1) % BATTLE_CMDS.length;
+    if (consume('ok')) {
+      const c = gameState.cursor;
+      if (c === 0) playerAttack(false);
+      else if (c === 1) playerAttack(true);
+      else if (c === 2) {
+        gameState.defending = true;
+        pushMsg(gameState.player.name + 'は 身を かまえた！');
+        gameState.battlePhase = 'message';
+        gameState.msgTimer = 30;
+        gameState.nextPhase = 'enemyTurn';
+      } else if (c === 3) {
+        if (gameState.scene === 'final_battle') {
+          pushMsg('逃げられない！');
+          gameState.battlePhase = 'message';
+          gameState.msgTimer = 30;
+          gameState.nextPhase = 'enemyTurn';
+        } else if (Math.random() < 0.6) {
+          pushMsg('うまく 逃げ切れた！');
+          gameState.battlePhase = 'flee';
+          gameState.msgTimer = 50;
+        } else {
+          pushMsg('しかし 回り込まれた！');
+          gameState.battlePhase = 'message';
+          gameState.msgTimer = 30;
+          gameState.nextPhase = 'enemyTurn';
+        }
+      }
+    }
+  } else if (gameState.battlePhase === 'message') {
+    if (gameState.msgTimer > 0) gameState.msgTimer--;
+    else {
+      if (gameState.enemy.hp <= 0) { resolveWin(); }
+      else if (gameState.nextPhase === 'enemyTurn') enemyTurn();
+      else if (gameState.nextPhase === 'lose') startBattleLose();
+      else { gameState.battlePhase = 'menu'; clearJust(); }
+    }
+  } else if (gameState.battlePhase === 'win') {
+    if (gameState.msgTimer > 0) gameState.msgTimer--;
+    if (gameState.msgTimer <= 0 && (consume('ok') || consume('cancel') || true)) {
+      startFade(() => {
+        gameState.scene = 'map';
+        gameState.cursor = 0;
+      });
+      gameState.battlePhase = 'done';
+    }
+  } else if (gameState.battlePhase === 'flee') {
+    if (gameState.msgTimer > 0) gameState.msgTimer--;
+    else {
+      startFade(() => {
+        gameState.scene = 'map';
+        gameState.cursor = 0;
+      });
+      gameState.battlePhase = 'done';
+    }
+  } else if (gameState.battlePhase === 'lose') {
+    if (gameState.msgTimer > 0) gameState.msgTimer--;
+    else {
+      startFade(() => {
+        gameState.scene = 'ending';
+        gameState.endingType = 'lose';
+        prepareEnding();
+      });
+      gameState.battlePhase = 'done';
+    }
+  } else if (gameState.battlePhase === 'finalWin') {
+    if (gameState.msgTimer > 0) gameState.msgTimer--;
+    else {
+      startFade(() => {
+        gameState.scene = 'ending';
+        gameState.endingType = 'win';
+        prepareEnding();
+      });
+      gameState.battlePhase = 'done';
+    }
+  }
+}
+
+function drawBattle() {
+  const p = pal();
+  // フラッシュ
+  if (gameState.flash > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (gameState.flash / 30) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+  // シェイクオフセット
+  let sx = 0, sy = 0;
+  if (gameState.shake > 0) { sx = randInt(-3, 3); sy = randInt(-2, 2); }
+  ctx.save();
+  ctx.translate(sx, sy);
+  fillBg();
+
+  // 上半分: 敵エリア
+  const eaY = 0, eaH = 240;
+  ctx.fillStyle = gameState.route === 'hero' ? '#1a2848' : '#2a1428';
+  ctx.fillRect(0, eaY, W, Math.floor(eaH * 0.6));
+  ctx.fillStyle = gameState.route === 'hero' ? '#2a3a28' : '#2a1a1a';
+  ctx.fillRect(0, eaY + Math.floor(eaH * 0.6), W, eaH - Math.floor(eaH * 0.6));
+
+  // 敵スプライト
+  const en = gameState.enemy;
+  let ex = W / 2, ey = 130;
+  if (gameState.shake > 0 && gameState.lastHit !== 1) {
+    ex += randInt(-4, 4);
+  }
+  const dotSize = gameState.scene === 'final_battle' ? 10 : 7;
+  drawSprite(en.sprite, ex, ey, dotSize, en.color);
+
+  // 敵名 + HPバー
+  const enX = W / 2 - 140, enY = 16;
+  drawWindow(enX, enY, 280, 40);
+  drawText(en.name, enX + 12, enY + 8, { size: 14, color: p.accent });
+  drawBar(enX + 12, enY + 26, 200, 8, en.hp / en.maxHp, p.hp);
+  drawText(en.hp + '/' + en.maxHp, enX + 268, enY + 22, { size: 12, color: p.text, align: 'right' });
+
+  // 下半分の境界
+  ctx.fillStyle = p.base;
+  ctx.fillRect(0, 240, W, H - 240);
+
+  // コマンドウィンドウ(左)
+  const cmdX = 8, cmdY = 248, cmdW = 200, cmdH = 130;
+  drawWindow(cmdX, cmdY, cmdW, cmdH);
+  drawText('コマンド', cmdX + 12, cmdY + 8, { size: 12, color: p.accent });
+  const showCmd = (gameState.battlePhase === 'menu');
+  for (let i = 0; i < BATTLE_CMDS.length; i++) {
+    const selected = showCmd && (i === gameState.cursor);
+    const yy = cmdY + 32 + i * 22;
+    if (selected) {
+      ctx.fillStyle = p.accent;
+      ctx.fillRect(cmdX + 14, yy + 7, 6, 4);
+    }
+    let col = p.text;
+    if (i === 1 && gameState.player.mp < gameState.player.skill.mp) col = p.textDim;
+    drawText(BATTLE_CMDS[i], cmdX + 28, yy, { size: 14, color: selected ? p.accent : col });
+  }
+
+  // ステータスウィンドウ(右)
+  const stX = 216, stY = 248, stW = W - 216 - 8, stH = 130;
+  drawWindow(stX, stY, stW, stH);
+  const pl = gameState.player;
+  drawText(pl.name + '  Lv ' + pl.lv, stX + 12, stY + 8, { size: 14, color: p.accent });
+  drawText('HP', stX + 12, stY + 32, { size: 12, color: p.text });
+  drawBar(stX + 40, stY + 34, stW - 110, 10, pl.hp / pl.maxHp, p.hp);
+  drawText(pl.hp + '/' + pl.maxHp, stX + stW - 12, stY + 32, { size: 12, color: p.text, align: 'right' });
+  drawText('MP', stX + 12, stY + 52, { size: 12, color: p.text });
+  drawBar(stX + 40, stY + 54, stW - 110, 10, pl.mp / pl.maxMp, p.mp);
+  drawText(pl.mp + '/' + pl.maxMp, stX + stW - 12, stY + 52, { size: 12, color: p.text, align: 'right' });
+  drawText('攻撃 ' + pl.atk + '   守備 ' + pl.def, stX + 12, stY + 76, { size: 12, color: p.text });
+  drawText('EXP ' + pl.exp + '/' + requiredExp(pl.lv), stX + 12, stY + 96, { size: 12, color: p.textDim });
+
+  // メッセージログ(下)
+  const lgX = 8, lgY = 384, lgW = W - 16, lgH = H - 384 - 8;
+  drawWindow(lgX, lgY, lgW, lgH);
+  for (let i = 0; i < gameState.messages.length; i++) {
+    drawText(gameState.messages[i], lgX + 14, lgY + 10 + i * 18, { size: 13, color: p.text });
+  }
+
+  // ダメージ数値
+  for (const d of gameState.damages) {
+    const isEnemy = (d.x === 0);
+    const targetX = isEnemy ? ex : (stX + stW / 2);
+    const targetY = (isEnemy ? ey - 20 : stY + 60) + d.y;
+    const alpha = clamp(d.life / 40, 0, 1);
+    ctx.globalAlpha = alpha;
+    drawText(d.text, targetX, targetY, { size: 20, align: 'center', color: d.color });
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// 10. シーン: エンディング
+// ============================================================
+const ENDING_TEXT = {
+  hero_win: [
+    '魔王ザギルは 静かに 膝をついた。',
+    '「人間…よ。この刃は、いつか…」',
+    '声は 風に かき消え、城は 崩れ落ちた。',
+    '',
+    'アレンは 故郷へと 帰り着いた。',
+    '畑に 麦が 揺れ、誰もが 名を 呼んでくれる。',
+    'しかし 旅の 記憶だけは、',
+    'いつまでも 胸の奥で 灯っていた。',
+    '',
+    '― 勇者ルート  完 ―',
+  ],
+  demon_win: [
+    '勇者リオンは 剣を取り落とした。',
+    '「ならば…俺の意志は…誰が…」',
+    '聖堂の光は 翳り、王都は 黒い旗に 覆われた。',
+    '',
+    'ヴェルクは 玉座に 腰を下ろす。',
+    '人類は 膝を折り、長い夜が 始まった。',
+    '勝利の 味は 苦く、ただ 静かだった。',
+    '',
+    '― 魔王軍ルート  完 ―',
+  ],
+  hero_lose: [
+    'アレンの 意識は 闇へと 沈んでいく。',
+    '世界は 救われなかった。',
+    '',
+    '魔王の 哄笑が どこまでも 響き渡る。',
+    '',
+    '― BAD END ―',
+    '',
+    '(Zキーで タイトルへ)',
+  ],
+  demon_lose: [
+    'ヴェルクは 光の中で 砕け散った。',
+    '魔王軍の 野望は 潰えた。',
+    '',
+    '勇者の 物語が、今 始まる。',
+    '',
+    '― BAD END ―',
+    '',
+    '(Zキーで タイトルへ)',
+  ],
+};
+
+function prepareEnding() {
+  const key = gameState.route + '_' + gameState.endingType;
+  gameState.endingText = ENDING_TEXT[key];
+  gameState.endingLine = 0;
+  gameState.endingChar = 0;
+  gameState.endingDoneTimer = 0;
+}
+
+function updateEnding() {
+  if (gameState.fade > 0) return;
+  // 早送り
+  const fast = input.ok || input.cancel;
+  const speed = fast ? 4 : 1;
+  for (let s = 0; s < speed; s++) {
+    if (gameState.endingLine >= gameState.endingText.length) {
+      gameState.endingDoneTimer++;
+      break;
+    }
+    const line = gameState.endingText[gameState.endingLine];
+    if (gameState.endingChar < line.length) {
+      gameState.endingChar++;
+    } else {
+      gameState.endingDoneTimer++;
+      if (gameState.endingDoneTimer > 18) {
+        gameState.endingLine++;
+        gameState.endingChar = 0;
+        gameState.endingDoneTimer = 0;
+      }
+    }
+  }
+  if (gameState.endingLine >= gameState.endingText.length && gameState.endingDoneTimer > 60) {
+    if (consume('ok')) {
+      startFade(() => {
+        Object.assign(gameState, {
+          scene: 'title', route: null, player: null,
+          zoneIndex: 0, battlesInZone: 0, enemy: null,
+          cursor: 0, messages: [], damages: [], endingText: [],
+        });
+      });
+    }
+  } else {
+    consume('ok'); consume('cancel');
+  }
+}
+
+function drawEnding() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  // 枠
+  ctx.strokeStyle = pal().accent;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(40, 40, W - 80, H - 80);
+  ctx.strokeStyle = pal().border2;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(46, 46, W - 92, H - 92);
+
+  const title = gameState.endingType === 'win' ? 'ENDING' : 'GAME OVER';
+  drawText(title, W / 2, 70, { size: 20, align: 'center', color: pal().accent });
+
+  const startY = 130;
+  for (let i = 0; i < gameState.endingText.length; i++) {
+    let txt = gameState.endingText[i];
+    if (i > gameState.endingLine) break;
+    if (i === gameState.endingLine) txt = txt.slice(0, gameState.endingChar);
+    drawText(txt, W / 2, startY + i * 24, { size: 14, align: 'center', color: pal().text });
+  }
+
+  if (gameState.endingLine >= gameState.endingText.length) {
+    if (Math.floor(performance.now() / 500) % 2 === 0) {
+      drawText('▼', W / 2, H - 70, { size: 14, align: 'center', color: pal().accent });
+    }
+  }
+}
+
+// ============================================================
+// 11. フェード
+// ============================================================
+function startFade(onMid) {
+  gameState.fade = 0.01;
+  gameState.fadeDir = 1;
+  gameState.fadeNext = onMid;
+}
+function updateFade() {
+  if (gameState.fade <= 0) return;
+  gameState.fade += gameState.fadeDir * 0.08;
+  if (gameState.fade >= 1 && gameState.fadeDir > 0) {
+    gameState.fade = 1;
+    if (gameState.fadeNext) { gameState.fadeNext(); gameState.fadeNext = null; }
+    gameState.fadeDir = -1;
+    clearJust();
+  } else if (gameState.fade <= 0 && gameState.fadeDir < 0) {
+    gameState.fade = 0;
+    gameState.fadeDir = 0;
+  }
+}
+function drawFade() {
+  if (gameState.fade <= 0) return;
+  ctx.fillStyle = 'rgba(0,0,0,' + gameState.fade + ')';
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ============================================================
+// 12. メインループ
+// ============================================================
+function update() {
+  updateFade();
+  switch (gameState.scene) {
+    case 'title':        updateTitle(); break;
+    case 'route_select': updateRouteSelect(); break;
+    case 'map':          updateMap(); break;
+    case 'battle':       updateBattle(); break;
+    case 'final_battle': updateBattle(); break;
+    case 'ending':       updateEnding(); break;
+  }
+  // 未消費のjustPressedをクリア(自動)
+  for (const k in justPressed) justPressed[k] = false;
+}
+
+function draw() {
+  switch (gameState.scene) {
+    case 'title':        drawTitle(); break;
+    case 'route_select': drawRouteSelect(); break;
+    case 'map':          drawMap(); break;
+    case 'battle':       drawBattle(); break;
+    case 'final_battle': drawBattle(); break;
+    case 'ending':       drawEnding(); break;
+  }
+  drawFade();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+cvs.focus();
+loop();
+
+</script>
+</body>
+</html>
