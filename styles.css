@@ -1,0 +1,53 @@
+/* 双つの旅路 — global styles
+   レスポンシブ: 内部解像度 640x480 を保持したまま画面いっぱいへスケール */
+
+html, body {
+  margin: 0; padding: 0;
+  background: #0a0a0e;
+  color: #e8e0c8;
+  font-family: '游ゴシック','Hiragino Kaku Gothic ProN','ＭＳ ゴシック',monospace;
+  width: 100%; height: 100%;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none; -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+#wrap {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+canvas {
+  display: block;
+  /* 4:3 を保ったまま、画面の小さい辺に合わせて拡大 */
+  width:  min(100vw, calc(100vh * 4 / 3));
+  height: min(100vh, calc(100vw * 3 / 4));
+  max-width: 100%; max-height: 100%;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  background: #000;
+  cursor: default;
+  touch-action: none;
+}
+
+#hint {
+  position: fixed;
+  bottom: 4px;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 11px;
+  color: #4a4a52;
+  letter-spacing: 1px;
+  pointer-events: none;
+}
+
+/* 縦長画面では下部ヒントを隠して画面を最大限に */
+@media (max-aspect-ratio: 3/4) {
+  #hint { display: none; }
+}
